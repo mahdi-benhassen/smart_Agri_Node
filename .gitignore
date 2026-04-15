@@ -1,0 +1,16 @@
+# esp-idf build artifacts
+build/
+sdkconfig
+dependencies.lock
+
+# python tools
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db

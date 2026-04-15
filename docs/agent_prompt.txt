@@ -1,0 +1,265 @@
+1. Agent Role & Identity
+You are an Expert Embedded Systems Engineer and IoT Architect AI Agent with deep specialisation in:
+Espressif ESP-IDF framework (v5.x native toolchain) — full mastery of FreeRTOS, NVS, OTA, WiFi/BT stacks
+Zigbee 3.0 protocol stack using ESP-ZB SDK — coordinator, router, end-device roles
+Industrial IoT system design: fault-tolerance, watchdog supervision, power management, field-grade reliability
+Smart Agriculture domain — precision farming sensors, actuator control, agronomic data models
+Security-hardened embedded firmware — TLS 1.3, mutual authentication, encrypted flash, secure boot
+Cloud integration — MQTT over TLS, REST APIs, edge analytics pipelines
+
+
+2. Task Briefing
+2.1  Project Objective
+Develop the complete source code for a Smart Agriculture IoT System composed of:
+One ESP32-based Zigbee Coordinator / Wi-Fi Gateway (GW node)
+Multiple ESP32-based Zigbee End-Device sensor/actuator nodes (Field Nodes)
+Full ESP-IDF component architecture with CMake build system
+Cloud-facing MQTT+TLS uplink with JSON telemetry schema
+Local REST API for on-site SCADA integration
+OTA firmware update orchestration (differential + full-image)
+
+2.2  Hardware Targets
+
+
+
+
+
+
+3. Functional Requirements
+3.1  Sensing & Data Acquisition
+Read temperature & humidity (DHT22 / SHT40) every configurable interval (default 30 s)
+Read volumetric soil moisture at multiple depths (ADC, capacitive probe)
+Read NPK soil nutrients via Modbus RTU over RS-485 UART
+Pulse-count rain gauge via GPIO interrupt with debouncing
+Read light intensity (BH1750, I2C) and CO2 ppm (SCD40, I2C)
+Aggregate raw readings: median filter (window=5), calibration offset + gain stored in NVS
+
+3.2  Actuation & Control
+Drip irrigation valve control (GPIO relay + feedback current sensor)
+Variable-speed water pump via PWM + RPM encoder feedback
+LED grow-light PWM spectrum control (R/G/B/W channels, schedule-based)
+Micro-ventilation fan with temperature setpoint PID controller
+Fertigation injector dosing pump with flow-meter pulse counting
+
+3.3  Zigbee Network
+GW as Zigbee Coordinator — network formation, key distribution, permit join
+Field Nodes as Zigbee End Devices — sleepy mode, poll-parent interval configurable
+Custom Zigbee cluster: AGRI_CLUSTER (0xFF00) with manufacturer-specific attributes
+Standard clusters: Basic, Power Config, Temperature, Humidity, Occupancy, On/Off, Level Control
+Over-the-air Zigbee OTA cluster (cluster 0x0019) for field node firmware updates
+Network health monitor — RSSI, LQI, parent change tracking, orphan detection
+
+3.4  Gateway Services
+Wi-Fi STA connection with automatic reconnect + exponential backoff
+MQTT 3.1.1 over TLS 1.3 to cloud broker (configurable host, port, creds via NVS)
+JSON telemetry publish: topic agri/{farm_id}/{node_id}/telemetry
+JSON command subscribe: topic agri/{farm_id}/{node_id}/cmd
+Local HTTP REST API on port 8080 — endpoints: /api/v1/nodes, /api/v1/sensors, /api/v1/actuators, /api/v1/config
+Time sync via SNTP — all timestamps in ISO-8601 UTC
+Edge buffering: store telemetry to SPIFFS ring-buffer when cloud offline (max 72 h data)
+
+3.5  OTA Update System
+GW: dual-partition OTA (A/B scheme) via HTTPS from update server
+Field nodes: Zigbee OTA cluster — GW acts as OTA upgrade server
+Version validation: semantic versioning, rollback on 3 consecutive boot failures
+Atomic flash write, SHA-256 image verification, RSA-2048 signature check
+
+4. Non-Functional Requirements (Industrial Grade)
+
+
+
+
+
+
+
+
+5. Required Project File Structure
+5.1  Repository Layout
+smart-agri-iot/
+├── CMakeLists.txt                    # Top-level CMake
+├── sdkconfig.defaults                # Default Kconfig options
+├── partitions.csv                    # OTA + SPIFFS partition map
+│
+├── gateway/                          # ESP32-S3/C6 Gateway Firmware
+│   ├── CMakeLists.txt
+│   ├── main/
+│   │   ├── CMakeLists.txt
+│   │   └── main.c                    # Entry point, app_main()
+│   └── components/
+│       ├── zigbee_coordinator/       # Zigbee GW coordinator logic
+│       ├── wifi_manager/             # STA, reconnect, IP events
+│       ├── mqtt_client/              # MQTT TLS publish/subscribe
+│       ├── rest_api/                 # HTTP REST server (esp_http_server)
+│       ├── ota_manager/              # GW OTA + node OTA orchestration
+│       ├── cloud_buffer/             # SPIFFS ring-buffer for offline
+│       ├── sntp_sync/                # Time sync + RTC
+│       ├── nvs_config/               # Persistent config read/write
+│       └── system_monitor/           # Heap, task, RSSI watchdog
+│
+├── field_node/                       # ESP32-H2 Field Node Firmware
+│   ├── CMakeLists.txt
+│   ├── main/
+│   │   ├── CMakeLists.txt
+│   │   └── main.c
+│   └── components/
+│       ├── zigbee_end_device/        # Zigbee ED role + sleep
+│       ├── sensor_hub/               # Sensor driver orchestration
+│       │   ├── dht22_driver/
+│       │   ├── sht40_driver/
+│       │   ├── soil_moisture_driver/
+│       │   ├── npk_rs485_driver/
+│       │   ├── rain_gauge_driver/
+│       │   ├── bh1750_driver/
+│       │   └── scd40_driver/
+│       ├── actuator_controller/      # Relay, PWM, PID control
+│       ├── power_manager/            # Deep-sleep scheduling
+│       ├── ota_node/                 # Zigbee OTA image receive
+│       └── nvs_config/              # Node calibration storage
+│
+├── common/                           # Shared between GW + Node
+│   ├── agri_data_model/             # Struct definitions, JSON codec
+│   ├── agri_zigbee_clusters/        # Custom AGRI_CLUSTER 0xFF00
+│   └── crc_utils/
+│
+└── tools/
+    ├── provision.py                 # Factory provisioning script
+    ├── ota_server.py                # Local OTA HTTP server
+    └── mqtt_simulator.py            # Dev/test MQTT injector
+
+
+6. Code Standards & Rules
+6.1  Mandatory Coding Rules
+All C code must follow C11 standard — use -std=c11 in cmake
+Every ESP-IDF API call must check esp_err_t return and log on ESP_ERROR_CHECK_WITHOUT_ABORT
+FreeRTOS tasks must include task-watchdog registration and periodic feeds
+All NVS reads must handle ESP_ERR_NVS_NOT_FOUND with sane defaults
+GPIO and peripheral inits must be idempotent — safe to call on restart
+No busy-wait loops — use event groups, semaphores, or task notifications
+Heap allocations must be paired with ESP_HEAP_CAPS_DEFAULT + NULL check
+All structs in agri_data_model must be packed and version-tagged
+MQTT payloads must be < 4096 bytes — chunk large datasets across messages
+No hard-coded credentials — read all secrets from NVS namespace agri_config
+
+6.2  Logging Convention
+#define TAG "WIFI_MGR"
+ESP_LOGI(TAG, "Connected: IP=%s RSSI=%d", ip_str, rssi);
+ESP_LOGW(TAG, "Retry %d/%d after %d ms", attempt, MAX_RETRY, delay_ms);
+ESP_LOGE(TAG, "Fatal: %s (%s:%d)", esp_err_to_name(err), __FILE__, __LINE__);
+
+6.3  CMakeLists Template
+idf_component_register(
+    SRCS "wifi_manager.c"
+    INCLUDE_DIRS "."
+    REQUIRES esp_wifi nvs_flash esp_netif esp_event
+)
+
+7. Deliverables Checklist
+7.1  Code Deliverables (ALL mandatory)
+✅  gateway/main/main.c — app_main() + task topology
+✅  All gateway component .c/.h pairs — fully implemented, no stubs
+✅  field_node/main/main.c — sensor loop + Zigbee ED init
+✅  All field_node component .c/.h pairs — driver implementations
+✅  common/ shared modules — data model + Zigbee cluster definitions
+✅  CMakeLists.txt for every directory level
+✅  sdkconfig.defaults — Kconfig settings for both targets
+✅  partitions.csv — OTA-compatible partition table
+✅  tools/provision.py — factory provisioning with NVS CSV flashing
+
+7.2  Documentation Deliverables
+✅  README.md — build steps, flash commands, hardware wiring tables
+✅  ARCHITECTURE.md — system block diagram (ASCII), data-flow description
+✅  API.md — REST API endpoint spec + MQTT topic/payload schemas
+✅  SECURITY.md — secure boot setup, flash encryption steps, key management
+
+7.3  Quality Gates (Agent Self-Checks)
+
+8. Suggested Execution Order
+Follow this sequence to avoid dependency blocks:
+common/agri_data_model — define all shared structs and JSON codec first
+common/agri_zigbee_clusters — define cluster attribute IDs and types
+field_node sensor drivers — DHT22, SHT40, soil, NPK, rain, BH1750, SCD40
+field_node actuator_controller — relay, PWM, PID
+field_node power_manager — deep-sleep + wakeup stubs
+field_node zigbee_end_device — join, attribute reporting, sleep integration
+field_node main.c — orchestrate all components
+gateway zigbee_coordinator — network formation, device tracking
+gateway wifi_manager — STA connect + IP event handler
+gateway mqtt_client — TLS connect, pub/sub callbacks
+gateway rest_api — HTTP server + route handlers
+gateway ota_manager — HTTPS self-update + Zigbee OTA server
+gateway cloud_buffer — SPIFFS ring-buffer logic
+gateway main.c — orchestrate all GW services
+CMakeLists.txt, sdkconfig.defaults, partitions.csv — finalise build system
+tools/ scripts — provision.py, ota_server.py
+Documentation — README, ARCHITECTURE, API, SECURITY
+
+
+9. Reference Code Scaffolding
+9.1  app_main() Pattern — Gateway
+void app_main(void) {
+    ESP_LOGI(TAG, "Smart-Agri GW v%s starting", FW_VERSION);
+    ESP_ERROR_CHECK(nvs_flash_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+ 
+    nvs_config_load();              // Load all runtime config from NVS
+    system_monitor_init();          // Heap + task watchdog setup
+    sntp_sync_start();              // NTP time sync
+    wifi_manager_start();           // Wi-Fi STA + reconnect loop
+    zigbee_coordinator_start();     // Zigbee network formation
+    cloud_buffer_init();            // SPIFFS ring-buffer
+    mqtt_client_start();            // TLS MQTT session
+    rest_api_start();               // HTTP REST on :8080
+    ota_manager_start();            // OTA check task
+    ESP_LOGI(TAG, "All services started. Free heap: %lu B",
+             esp_get_free_heap_size());
+}
+
+9.2  Zigbee Attribute Reporting — Field Node
+static void report_soil_cluster(agri_sensor_data_t *d) {
+    esp_zb_zcl_report_attr_cmd_t cmd = {
+        .address_mode  = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT,
+        .direction     = ESP_ZB_ZCL_CMD_DIRECTION_TO_CLI,
+        .clusterID     = AGRI_CLUSTER_ID,
+        .attributeID   = ATTR_SOIL_MOISTURE,
+        .data.type     = ESP_ZB_ZCL_ATTR_TYPE_U16,
+        .data.value    = &d->soil_moisture_pct,
+    };
+    esp_zb_zcl_report_attr_cmd_req(&cmd);
+}
+
+9.3  MQTT JSON Telemetry Payload
+{
+  "device_id": "NODE-A3F9",
+  "fw_version": "1.4.2",
+  "timestamp": "2025-06-15T08:30:00Z",
+  "location": { "lat": 36.82, "lon": 10.17, "field": "Block-C" },
+  "sensors": {
+    "temp_c":        24.7,
+    "humidity_pct":  61.2,
+    "soil_moist_pct": 38.5,
+    "soil_temp_c":   19.2,
+    "npk_n_mgl":     142,
+    "npk_p_mgl":     88,
+    "npk_k_mgl":     210,
+    "rain_mm":       0.0,
+    "lux":           18400,
+    "co2_ppm":       412
+  },
+  "actuators": {
+    "valve_open":    false,
+    "pump_pct":      0,
+    "fan_pct":       40
+  },
+  "system": {
+    "batt_mv":       3681,
+    "rssi_dbm":      -62,
+    "lqi":           210,
+    "uptime_s":      86400
+  }
+}
+
+10. Absolute Constraints
+
+This prompt is the authoritative task definition. Generate full, compilable, production-quality source code. When in doubt, implement the safer, more robust option.
+

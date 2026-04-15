@@ -1,0 +1,43 @@
+name: ESP-IDF Build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    name: Build Firmware (ESP-IDF v5.2)
+    runs-on: ubuntu-latest
+    container: espressif/idf:release-v5.2
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Git Safe Directory
+        run: git config --global --add safe.directory /__w/smart_Agri_Node/smart_Agri_Node
+
+      - name: Build Field Node (ESP32-H2)
+        working-directory: field_node
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32h2
+          idf.py build | tee ../field_node_build_log.txt
+          
+      - name: Build Gateway (ESP32-S3)
+        working-directory: gateway
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32s3
+          idf.py build | tee ../gateway_build_log.txt
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            field_node_build_log.txt
+            gateway_build_log.txt

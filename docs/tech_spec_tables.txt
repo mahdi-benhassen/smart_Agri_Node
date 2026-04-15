@@ -1,0 +1,170 @@
+=== TABLE 0 ===
+🌿
+TECHNICAL SPECIFICATION
+Smart Agriculture IoT System
+ESP32 Gateway + Zigbee IoT Nodes  |  ESP-IDF Native  |  PRO Industrial Edition
+Document ID: SAGRI-SPEC-001    Revision: 1.0    Status: RELEASED
+Classification: Proprietary — Internal Engineering Use
+
+=== TABLE 1 ===
+Parameter | Value
+System Name | SAGRI — Smart Agriculture IoT Platform
+Hardware Platform | ESP32-S3 (GW) + ESP32-H2 (Field Nodes)
+Firmware Framework | ESP-IDF v5.2+  (idf.py native toolchain)
+Wireless Protocol | Zigbee 3.0 (IEEE 802.15.4) + Wi-Fi 4 (GW)
+Cloud Protocol | MQTT 3.1.1 over TLS 1.3
+Maximum Nodes | 250 per Coordinator (Zigbee spec max)
+Operating Temp | -20 °C to +70 °C
+Node Battery Life | > 2 years (3.6 V Li-SOCl₂ 4000 mAh)
+Security | Secure Boot v2, Flash Encryption, Zigbee AES-128
+OTA Updates | GW: HTTPS; Nodes: Zigbee OTA Cluster 0x0019
+
+=== TABLE 2 ===
+Attribute | Specification
+MCU | ESP32-S3 — dual Xtensa LX7 @ 240 MHz
+Flash | 8 MB SPI Flash (Quad SPI) — OTA dual partition
+RAM | 8 MB PSRAM + 512 KB SRAM
+Wi-Fi | 802.11 b/g/n (2.4 GHz), WPA2/WPA3 Personal
+Zigbee | IEEE 802.15.4 (2.4 GHz), Zigbee 3.0 via co-processor or modem
+USB | USB 2.0 OTG (programming + CDC log)
+GPIO | 45 programmable GPIO, ADC 12-bit, I2C x2, SPI x2, UART x2
+Power Input | 5 V DC via USB or 7-15 V via barrel jack (LDO onboard)
+Enclosure | DIN rail IP65 ABS, 120 × 80 × 50 mm
+
+=== TABLE 3 ===
+Attribute | Specification
+MCU | ESP32-H2 — single RISC-V @ 96 MHz
+Flash | 4 MB SPI Flash — Zigbee OTA capable
+RAM | 320 KB SRAM
+Zigbee | IEEE 802.15.4 integrated transceiver, Zigbee 3.0 End Device
+Power Supply | 3.6 V Li-SOCl₂ cell (ER26500 / AA-equiv.) via LDO + protection
+Active Current | < 25 mA average during wake + TX cycle
+Sleep Current | < 15 µA deep-sleep with RTC wakeup
+UART | RS-485 half-duplex via MAX3485 transceiver for NPK sensor
+I2C | SHT40 (addr 0x44), BH1750 (0x23), SCD40 (0x62)
+ADC | 12-bit × 4 ch — soil moisture probes, current sense
+GPIO | Relay driver (ULN2003), PWM fan, rain gauge pulse, LED PWM
+Enclosure | IP67 ABS waterproof, 100 × 60 × 40 mm, M12 cable glands
+
+=== TABLE 4 ===
+Sensor | Interface | Range / Accuracy | Update Rate
+DHT22 | 1-Wire GPIO | Temp: -40–80 °C ±0.5 °C  RH: 0–100% ±2% | 2 s min
+SHT40 | I2C 0x44 | Temp: -40–125 °C ±0.2 °C  RH: ±1.5% | 1 s
+Soil Moist. | ADC 12-bit | VWC: 0–60%  ±3% | On demand
+NPK Sensor | RS-485 RTU | N/P/K: 0–1999 mg/L ±2% | 10 s
+Rain Gauge | GPIO ISR | 0.2 mm per pulse, ±4% | Interrupt
+BH1750 | I2C 0x23 | 1–65535 lux ±20% | 120 ms
+SCD40 | I2C 0x62 | CO₂: 400–5000 ppm ±50 ppm | 5 s
+
+=== TABLE 5 ===
+Attribute ID | Name | Type | Access | Description
+0x0001 | soil_moisture_pct | U16 | R | Soil VWC × 100 (0–6000 = 0–60.00%)
+0x0002 | soil_temp_c | S16 | R | Soil temperature × 100
+0x0003 | npk_nitrogen | U16 | R | N mg/L
+0x0004 | npk_phosphorus | U16 | R | P mg/L
+0x0005 | npk_potassium | U16 | R | K mg/L
+0x0006 | rain_mm_x100 | U32 | R | Cumulative rain × 100
+0x0007 | lux | U32 | R | Light intensity
+0x0008 | co2_ppm | U16 | R | CO₂ concentration ppm
+0x0009 | batt_mv | U16 | R | Battery voltage mV
+0x000A | valve_state | Bool | R/W | Irrigation valve open/close
+0x000B | pump_pct | U8 | R/W | Pump PWM duty 0–100%
+0x000C | fan_pct | U8 | R/W | Fan duty 0–100%
+0x000D | led_r_pct | U8 | R/W | LED Red channel 0–100%
+0x000E | led_b_pct | U8 | R/W | LED Blue channel 0–100%
+0x000F | alarm_flags | U16 | R | Bit-field: sensor fault flags
+
+=== TABLE 6 ===
+Cluster | ID | Role | Used For
+Basic | 0x0000 | Server | Device info, reset, SW version
+Power Config | 0x0001 | Server | Battery percentage, voltage alert
+Temperature | 0x0402 | Server | Ambient temp (mapped from SHT40)
+Rel. Humidity | 0x0405 | Server | Ambient humidity
+On/Off | 0x0006 | Server | Valve open/close commands
+Level Control | 0x0008 | Server | Pump & fan PWM level
+Identify | 0x0003 | Server | Commissioning identify blink
+OTA Upgrade | 0x0019 | Client | Node firmware update via Zigbee
+Time | 0x000A | Client | UTC time sync from coordinator
+
+=== TABLE 7 ===
+Task Name | Stack | Priority | Core | Description
+wifi_mgr_task | 4096 | 5 | 0 | STA connect, reconnect loop, IP events
+mqtt_pub_task | 8192 | 4 | 0 | Dequeue telemetry, publish MQTT
+mqtt_sub_task | 4096 | 4 | 0 | Subscribe cmd topics, route to Zigbee
+zb_main_task | 8192 | 6 | 1 | Zigbee stack main loop (ESP-ZB)
+rest_api_task | 6144 | 3 | 0 | HTTP server + request handling
+ota_check_task | 8192 | 2 | 0 | Periodic OTA version poll + flash
+sntp_task | 2048 | 1 | 0 | NTP sync, RTC set
+cloud_buffer_task | 4096 | 3 | 0 | SPIFFS ring-buffer flush on reconnect
+sys_monitor_task | 2048 | 1 | 0 | Heap, task-WDT feeds, RSSI report
+
+=== TABLE 8 ===
+Producer | Consumer | Mechanism | Payload
+zigbee_coordinator | mqtt_pub_task | FreeRTOS Queue (len=64) | agri_sensor_data_t (256 B)
+mqtt_sub_task | zigbee_coordinator | FreeRTOS Queue (len=32) | agri_cmd_t (32 B)
+wifi_manager | mqtt_client | EventGroup bit WIFI_CONNECTED | —
+cloud_buffer_task | mqtt_pub_task | SPIFFS file read + Queue inject | JSON string (≤4096 B)
+ota_manager | main | EventGroup bit OTA_DONE | —
+
+=== TABLE 9 ===
+Phase | Duration | Current | Energy (µAh)
+Boot + NVS init | 300 ms | 25 mA | 2.08
+Sensor acquire (all) | 800 ms | 22 mA | 4.89
+Zigbee TX + ACK | 200 ms | 30 mA | 1.67
+Deep sleep (30 s cycle) | 28.7 s | 15 µA | 0.12
+Total per 30 s cycle | 30 s | — | 8.76 µAh
+Daily energy | 24 h | — | 10.51 mAh/day
+Battery life (4000 mAh) | — | — | > 380 days (> 1 year)
+
+=== TABLE 10 ===
+Direction | Topic Pattern | QoS | Retain | Description
+GW → Cloud | agri/{farm_id}/{node_id}/telemetry | 1 | No | Sensor telemetry, 30 s
+GW → Cloud | agri/{farm_id}/{node_id}/status | 1 | Yes | Device online/offline
+GW → Cloud | agri/{farm_id}/gw/health | 0 | No | GW heap, uptime, RSSI
+Cloud → GW | agri/{farm_id}/{node_id}/cmd | 1 | No | Actuator commands
+Cloud → GW | agri/{farm_id}/gw/ota | 1 | No | GW OTA trigger URL
+Cloud → GW | agri/{farm_id}/{node_id}/ota | 1 | No | Node OTA trigger URL
+Cloud → GW | agri/{farm_id}/config | 1 | Yes | Global config push
+
+=== TABLE 11 ===
+Method | Endpoint | Auth | Description
+GET | /api/v1/nodes | Bearer | List all joined Zigbee nodes
+GET | /api/v1/nodes/{id}/sensors | Bearer | Latest sensor readings for node
+GET | /api/v1/nodes/{id}/actuators | Bearer | Current actuator states
+POST | /api/v1/nodes/{id}/cmd | Bearer | Send actuator command to node
+GET | /api/v1/config | Bearer | Read NVS config (sanitised)
+POST | /api/v1/config | Bearer | Write NVS config fields
+POST | /api/v1/ota/gateway | Bearer | Trigger GW OTA from URL
+POST | /api/v1/ota/node/{id} | Bearer | Trigger node Zigbee OTA
+GET | /api/v1/health | None | GW health check (uptime, heap)
+
+=== TABLE 12 ===
+Layer | Mechanism | Details
+Boot | Secure Boot v2 | RSA-2048 signed bootloader; chain-of-trust to app partition
+Storage | Flash Encryption | AES-256 XTS — all flash content encrypted at rest
+Zigbee NWK | AES-128 NWK key | Rotated on key coordinator command; no default key
+Zigbee App | Link key per device | Unique TCLK provisioned at factory via provision.py
+Transport | TLS 1.3 | MQTT + HTTPS OTA; mutual auth with client cert
+API Auth | JWT Bearer token | RS256, 1 h expiry, refresh via /api/v1/auth/refresh
+OTA Image | RSA-2048 + SHA-256 | Signature verified before boot partition switch
+Credentials | NVS Encrypted | NVS partition encrypted separately; keys in eFuse
+
+=== TABLE 13 ===
+🔒  eFuse Configuration (Production)
+• JTAG disable bit: burn to prevent debug access on production units
+• Secure download mode: restrict UART flashing after production provisioning
+• Key block 0: Secure Boot RSA-2048 public key digest
+• Key block 1: Flash Encryption AES-256 key (hardware generated)
+• WR_DIS bits: write-protect all sensitive eFuse blocks after provisioning
+
+=== TABLE 14 ===
+✅  Pre-Deployment Verification
+□ GW connected to field Wi-Fi, IP assigned, SNTP synced
+□ MQTT broker reachable (ping + TLS handshake verified)
+□ All field nodes powered, joined Zigbee network (check /api/v1/nodes)
+□ Sensor readings within expected range for ambient conditions
+□ Test actuator cycle: valve open 5 s → close (visual confirm)
+□ Confirm telemetry appearing in cloud dashboard
+□ OTA check: both GW and nodes running latest production firmware
+□ Alarm flag register = 0x0000 on all nodes
+

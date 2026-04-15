@@ -1,0 +1,274 @@
+1. Project Overview
+1.1  Executive Summary
+This document defines the complete technical specification for the Smart Agriculture IoT System (SAGRI), an industrial-grade wireless sensor-actuator network targeting precision agriculture applications including greenhouse automation, open-field irrigation management, soil health monitoring, and crop microclimate control.
+The system is built on the Espressif ESP-IDF native framework exclusively — no Arduino or third-party RTOS abstractions. All firmware is production-grade: fully tested, fault-tolerant, and deployment-ready for real-world farm environments.
+
+1.2  System at a Glance
+
+
+2. System Architecture
+2.1  High-Level Block Diagram (ASCII)
+  ┌──────────────────────────────────────────────────────────────────┐
+  │                     CLOUD / SCADA LAYER                         │
+  │   MQTT Broker (TLS)   REST API Clients   OTA Update Server      │
+  └───────────────────────────┬──────────────────────────────────────┘
+                              │ Wi-Fi / Ethernet (TLS 1.3)
+  ┌───────────────────────────▼──────────────────────────────────────┐
+  │              ESP32-S3  GATEWAY  (Zigbee Coordinator)            │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+  │  │ WiFi Manager │  │ MQTT Client  │  │ REST API :8080       │  │
+  │  │ STA+Reconnect│  │ TLS Pub/Sub  │  │ /nodes /sensors /ota │  │
+  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
+  │  │ ZB Coord     │  │ OTA Manager  │  │ Cloud Buffer SPIFFS  │  │
+  │  │ Network Form │  │ GW+Node OTA  │  │ 72h offline ring buf │  │
+  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
+  └──────────────────────────┬───────────────────────────────────────┘
+                             │ Zigbee 3.0  (IEEE 802.15.4)
+          ┌──────────────────┼──────────────────┐
+          ▼                  ▼                  ▼
+  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+  │ Field Node 1 │  │ Field Node 2 │  │ Field Node N │
+  │  ESP32-H2    │  │  ESP32-H2    │  │  ESP32-H2    │
+  │  Sensors:    │  │  Sensors:    │  │  Sensors:    │
+  │  DHT22/SHT40 │  │  DHT22/SHT40 │  │  DHT22/SHT40 │
+  │  Soil Moist  │  │  Soil Moist  │  │  NPK RS-485  │
+  │  NPK RS-485  │  │  Rain Gauge  │  │  BH1750 Lux  │
+  │  BH1750/SCD40│  │  BH1750/SCD40│  │  SCD40 CO2   │
+  │  Actuators:  │  │  Actuators:  │  │  Actuators:  │
+  │  Valve/Pump  │  │  Valve/Pump  │  │  Fan/PWM LED │
+  └──────────────┘  └──────────────┘  └──────────────┘
+  [Deep-sleep ED]   [Deep-sleep ED]   [Deep-sleep ED]
+
+2.2  Data-Flow Description
+Field Node wakes from deep-sleep, acquires all sensor readings, applies calibration offsets (NVS)
+Processed data packaged into AGRI_CLUSTER attributes, transmitted to Gateway via Zigbee ZCL reporting
+Gateway receives Zigbee frames, decodes attribute report, maps to agri_sensor_data_t struct
+Data JSON-encoded per telemetry schema and published to MQTT topic agri/{farm}/{node}/telemetry
+If Wi-Fi/MQTT offline: data written to SPIFFS ring-buffer (max 72 h); replayed on reconnect
+Cloud sends command to MQTT topic agri/{farm}/{node}/cmd; GW forwards via Zigbee On/Off or Level cluster
+Field Node receives actuator command, executes relay/PWM control, sends acknowledgement cluster
+
+
+3. Hardware Specifications
+3.1  Gateway Board — ESP32-S3
+
+3.2  Field Node Board — ESP32-H2
+
+3.3  Sensor Specifications
+
+
+4. Zigbee Network Specification
+4.1  Network Topology
+Star-extended mesh topology — Coordinator (GW) + optional Router nodes + End Devices
+PAN ID: 0xAGRI (configurable via NVS provisioning)
+Channel selection: automated energy scan on channels 11, 15, 20, 25 at startup
+Network key: AES-128, generated on Coordinator at formation, distributed via Trust Center
+Link key (TCLK): preconfigured unique per-device during factory provisioning
+
+4.2  Custom AGRI_CLUSTER (0xFF00) — Manufacturer ID: 0x1234
+
+4.3  Standard Clusters Used
+
+
+5. Gateway Software Architecture
+5.1  FreeRTOS Task Map
+
+5.2  Component Dependency Graph
+main.c
+  ├── nvs_config        (no deps)
+  ├── system_monitor    (← freertos, esp_timer)
+  ├── sntp_sync         (← esp_netif, lwip)
+  ├── wifi_manager      (← esp_wifi, nvs_config)
+  │     └── [event]───► mqtt_client.connect()
+  ├── zigbee_coordinator(← esp-zboss, nvs_config)
+  │     └── [cb]──────► mqtt_pub_task.enqueue()
+  ├── mqtt_client       (← mqtt, tls, cloud_buffer)
+  ├── rest_api          (← esp_http_server, cJSON)
+  ├── cloud_buffer      (← spiffs, vfs)
+  └── ota_manager       (← esp_https_ota, esp_partition)
+
+5.3  Inter-Task Communication
+
+
+6. Field Node Software Architecture
+6.1  Wake / Sleep State Machine
+DEEP_SLEEP
+   │  [RTC timer expires — configurable, default 30 s]
+   ▼
+BOOT_INIT     nvs_config_load(), power_manager_check_voltage()
+   │
+   ▼
+SENSOR_ACQUIRE  acquire all sensors in parallel (FreeRTOS tasks)
+   │  DHT22/SHT40 ──► I2C  │  NPK ──► UART RS-485  │  ADC soil
+   │  BH1750 ──► I2C       │  SCD40 ──► I2C         │  Rain count
+   ▼
+DATA_PROCESS  median filter (window=5), apply NVS calibration
+   ▼
+ZIGBEE_JOIN_CHECK  already joined? → skip;  else join network (max 60 s)
+   ▼
+ZIGBEE_REPORT  send AGRI_CLUSTER attribute report to Coordinator
+   │  wait ACK (max 5 s) → retry x3 → mark alarm_flag
+   ▼
+ACTUATOR_POLL  check pending actuator cmd from parent poll (if any)
+   ▼
+OTA_CHECK     Zigbee OTA cluster query (every 24 wakeups = 12 min)
+   ▼
+SLEEP_PREP    flush NVS rain counter, set RTC wakeup timer
+   ▼
+DEEP_SLEEP    esp_deep_sleep_start()
+
+6.2  Power Budget
+
+
+7. Cloud Interface Specification
+7.1  MQTT Topic Schema
+
+7.2  Telemetry JSON Schema (agri/.../telemetry)
+{
+  "schema_ver": 2,
+  "device_id":  "NODE-A3F9",
+  "fw_ver":     "1.4.2",
+  "ts":         "2025-06-15T08:30:00.000Z",
+  "loc": { "lat": 36.82, "lon": 10.17, "field": "GH-C" },
+  "sensors": {
+    "temp_c":        24.7,
+    "humidity_pct":  61.2,
+    "soil_moist_pct":38.5,
+    "soil_temp_c":   19.2,
+    "npk_n":         142,
+    "npk_p":         88,
+    "npk_k":         210,
+    "rain_mm":       0.0,
+    "lux":           18400,
+    "co2_ppm":       412
+  },
+  "actuators": {
+    "valve_open":    false,
+    "pump_pct":      0,
+    "fan_pct":       40,
+    "led_r_pct":     60,
+    "led_b_pct":     80
+  },
+  "sys": {
+    "batt_mv":       3681,
+    "rssi_dbm":      -62,
+    "lqi":           210,
+    "uptime_s":      86400,
+    "alarm_flags":   0
+  }
+}
+
+7.3  REST API Endpoints (Gateway :8080)
+
+
+8. Security Architecture
+8.1  Security Layers
+
+
+
+9. OTA Update Architecture
+9.1  Gateway OTA (HTTPS)
+OTA check task polls ${OTA_SERVER}/api/v1/version?target=gw every 6 hours
+Compares semantic version in JSON response vs running FW_VERSION
+Downloads image via esp_https_ota() to standby OTA partition
+Verifies SHA-256 digest + RSA-2048 signature embedded in image
+On success: sets boot partition to new image, schedules reboot in 30 s
+On 3 consecutive boot failures: bootloader reverts to previous partition automatically
+
+9.2  Field Node OTA (Zigbee OTA Cluster 0x0019)
+GW receives node OTA URL via MQTT agri/{farm}/{node}/ota topic
+GW downloads image to PSRAM / temporary SPIFFS file
+GW activates as OTA Upgrade Server on Zigbee OTA cluster
+Node queries OTA server on next wakeup — image header block transferred
+Node streams image blocks (64 B each) — resumes from last block on sleep/wake
+On complete: node verifies SHA-256, resets, new firmware boots, reports version
+
+9.3  Partition Table
+# partitions.csv
+# Name,    Type, SubType,  Offset,   Size,     Flags
+nvs,       data, nvs,      0x9000,   0x6000,
+otadata,   data, ota,      0xF000,   0x2000,
+phy_init,  data, phy,      0x11000,  0x1000,
+ota_0,     app,  ota_0,    0x20000,  0x1E0000,
+ota_1,     app,  ota_1,    0x200000, 0x1E0000,
+spiffs,    data, spiffs,   0x3E0000, 0x20000,
+
+
+10. Testing & Validation Plan
+10.1  Unit Tests (Unity Framework via idf.py test)
+Sensor driver: inject mock I2C/UART responses, verify parsed values
+Calibration: NVS write/read roundtrip, offset/gain application
+MQTT codec: JSON encode agri_sensor_data_t, schema validate output
+Cloud buffer: fill to capacity, overflow policy, replay ordering
+OTA: mock HTTPS server, partial download + resume, bad SHA reject
+
+10.2  Integration Tests
+Full Zigbee join: Coordinator + 5 ED nodes — verify all join within 60 s
+Attribute reporting: node → GW data path latency < 500 ms
+Actuator round-trip: cloud cmd → MQTT → Zigbee → relay change < 2 s
+Offline resilience: kill Wi-Fi 1 h, restore, verify all buffered data replayed
+OTA end-to-end: push new FW to GW and to 3 nodes, verify version change
+
+10.3  Field Acceptance Tests
+72-hour continuous soak: all nodes running, no watchdog reset
+Power cycle: GW and nodes powered off/on 100 times — verify self-healing rejoin
+Range test: measure LQI at 100 m open field, 50 m inside greenhouse metal structure
+Temperature stress: operate at +65 °C in enclosure (simulated summer noon)
+Battery runtime: measure actual vs predicted at typical 30 s interval
+
+
+11. Factory Provisioning & Deployment
+11.1  Factory Provisioning Steps
+Flash bootloader, partition table, application image via esptool.py
+Run provision.py — generates unique device_id, provisions NVS CSV with keys
+Burn Secure Boot digest + Flash Encryption key to eFuse (non-reversible)
+Burn WR_DIS bits to lock eFuse blocks
+Run factory self-test — sensor comm check, Zigbee beacon TX, MQTT ping
+Label unit with QR code encoding device_id + provisioning timestamp
+
+11.2  Field Deployment Checklist
+
+
+12. Key sdkconfig.defaults Settings
+# Core
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+ 
+# OTA
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=y
+ 
+# Security
+CONFIG_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_MBEDTLS_TLS_CLIENT=y
+CONFIG_MBEDTLS_TLS_SERVER=y
+ 
+# Wi-Fi
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=16
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+ 
+# MQTT
+CONFIG_MQTT_TRANSPORT_SSL=y
+CONFIG_MQTT_BUFFER_SIZE=4096
+ 
+# Logging (production)
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_TIMESTAMP_SOURCE_RTOS=y
+ 
+# FreeRTOS
+CONFIG_FREERTOS_HZ=1000
+CONFIG_FREERTOS_ENABLE_BACKWARD_COMPATIBILITY=n
+CONFIG_ESP_TASK_WDT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+ 
+# SPIFFS
+CONFIG_SPIFFS_USE_MAGIC=y
+CONFIG_SPIFFS_USE_MAGIC_LENGTH=y
+
+End of Technical Specification Document — SAGRI-SPEC-001 Rev 1.0
+

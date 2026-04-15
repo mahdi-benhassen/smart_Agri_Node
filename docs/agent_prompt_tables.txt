@@ -1,0 +1,73 @@
+=== TABLE 0 ===
+🌱
+AI AGENT TASK PROMPT
+Smart Agriculture IoT System
+ESP32 Gateway + Zigbee Nodes  |  ESP-IDF Native  |  PRO Industrial Edition
+Version 1.0   •   Industrial-Grade   •   Production Ready
+
+=== TABLE 1 ===
+🎯  Mission Statement
+Design, architect, and implement a COMPLETE, production-ready Smart Agriculture IoT system.
+All code must compile and run on real hardware with ZERO placeholder functions.
+Every module must include error handling, logging, and self-recovery mechanisms.
+The deliverable is industrialised firmware — not a prototype or demo skeleton.
+
+=== TABLE 2 ===
+Gateway | ESP32-S3 (or ESP32-C6) — 8MB Flash, 8MB PSRAM, Wi-Fi 4, Zigbee 3.0
+
+=== TABLE 3 ===
+Field Node | ESP32-H2 — Ultra-low-power, Zigbee 3.0 End Device, deep-sleep capable
+
+=== TABLE 4 ===
+Toolchain | ESP-IDF v5.2+ (idf.py), ESP-ZB SDK v1.3+, CMake 3.20+
+
+=== TABLE 5 ===
+Build Command | idf.py set-target esp32s3 && idf.py build flash monitor
+
+=== TABLE 6 ===
+Sensors / I-O | DHT22, SHT40, SoilSens-v2, NPK RS-485, Rain gauge, Pump relay, Irrigation valve, LED grow light PWM
+
+=== TABLE 7 ===
+Reliability | MTBF target > 50,000 h; hardware watchdog + task watchdog; auto-recovery from all error states
+
+=== TABLE 8 ===
+Power (Nodes) | Active: < 25 mA avg; Deep-sleep: < 15 µA; Battery: 3.6 V Li-SOCl₂ 4000 mAh > 2 year life
+
+=== TABLE 9 ===
+Security | Secure Boot v2 + Flash Encryption enabled; TLS mutual auth; AES-256 Zigbee NWK key
+
+=== TABLE 10 ===
+Latency | Sensor-to-cloud < 5 s (normal); Actuator command < 2 s round-trip on local network
+
+=== TABLE 11 ===
+Scalability | Support 250 Zigbee nodes per coordinator; horizontal multi-GW support via broker topics
+
+=== TABLE 12 ===
+Environment | Operating temp: -20 °C to +70 °C; IP65 enclosure assumed; EMC: CE/FCC Class B
+
+=== TABLE 13 ===
+Compliance | Zigbee Alliance certification-ready; GDPR-safe data model; IEC 62443 L2 baseline
+
+=== TABLE 14 ===
+⚠️  Before Finalising Any File
+1. Does every esp_err_t return get checked? (No silent failures)
+2. Are all FreeRTOS tasks registered with the task watchdog?
+3. Are secrets absent from source — only read from NVS?
+4. Does the Zigbee cluster attribute list match the data model structs?
+5. Do CMakeLists REQUIRES lists include ALL used IDF components?
+6. Is deep-sleep entry guarded by a pending-Zigbee-TX check?
+7. Does OTA verify SHA-256 + RSA signature before boot switch?
+
+=== TABLE 15 ===
+🚫  Hard Rules — Never Violate
+• NO placeholder functions: void my_func() { /* TODO */ } is forbidden
+• NO Arduino framework: pure ESP-IDF idf.py only
+• NO blocking delays in ISR context — use xQueueSendFromISR()
+• NO floating-point in ISR — convert to integer fixed-point before ISR
+• NO credentials or keys hard-coded in source — NVS only
+• NO unchecked malloc() — always verify != NULL before use
+• NO task stacks below 4096 bytes — increase if unsure
+• NO printf() — use ESP_LOGx macros only
+• ALL Zigbee callbacks must return within 5 ms — offload to queues
+• ALL sensor drivers must handle I2C NACK / UART timeout gracefully
+
