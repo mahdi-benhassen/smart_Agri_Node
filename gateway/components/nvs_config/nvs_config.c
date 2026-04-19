@@ -1,10 +1,11 @@
 /*
- * SPDX-License-Identifier: Proprietary
- * Copyright (c) 2025 SAGRI Project
- *
  * nvs_config.c — Gateway NVS configuration implementation
+ *
+ * FIX applied:
+ *  12. gw_nvs_config_get_str: after strncpy(buf, def, max_len-1) the buffer
+ *      is explicitly null-terminated.  strncpy does NOT null-terminate when
+ *      source length >= max_len-1, leading to potential overreads.
  */
-
 #include "nvs_config.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -12,8 +13,8 @@
 #include <string.h>
 
 static const char *TAG = "GW_NVS";
-static nvs_handle_t s_handle = 0;
-static bool s_initialized = false;
+static nvs_handle_t s_handle      = 0;
+static bool         s_initialized = false;
 
 esp_err_t gw_nvs_config_init(void)
 {
@@ -33,15 +34,25 @@ esp_err_t gw_nvs_config_init(void)
     return ESP_OK;
 }
 
-esp_err_t gw_nvs_config_get_str(const char *key, char *buf, size_t max_len, const char *def)
+/* FIX 12: always null-terminate after strncpy */
+esp_err_t gw_nvs_config_get_str(const char *key, char *buf, size_t max_len,
+                                  const char *def)
 {
-    if (!s_initialized || !key || !buf) return ESP_ERR_INVALID_ARG;
+    if (!s_initialized || !key || !buf || max_len == 0) return ESP_ERR_INVALID_ARG;
+
     size_t len = max_len;
     esp_err_t ret = nvs_get_str(s_handle, key, buf, &len);
     if (ret == ESP_ERR_NVS_NOT_FOUND) {
-        if (def) strncpy(buf, def, max_len - 1);
-        else buf[0] = '\0';
+        if (def) {
+            strncpy(buf, def, max_len - 1);
+            buf[max_len - 1] = '\0';   /* FIX: guarantee null termination */
+        } else {
+            buf[0] = '\0';
+        }
         return ESP_OK;
+    }
+    if (ret == ESP_OK) {
+        buf[max_len - 1] = '\0';       /* Safety belt for NVS reads too */
     }
     return ret;
 }

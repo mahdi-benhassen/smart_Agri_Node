@@ -1,10 +1,11 @@
 /*
- * SPDX-License-Identifier: Proprietary
- * Copyright (c) 2025 SAGRI Project
- *
  * sensor_hub.c — Sensor hub: orchestrates all sensor drivers
+ *
+ * FIX applied:
+ *  4. A FreeRTOS mutex is added to sensor_ctx_t and taken before any
+ *     parallel task writes to the shared agri_sensor_data_t, preventing
+ *     race conditions on multi-core ESP32-S3.
  */
-
 #include "sensor_hub.h"
 #include "dht22_driver.h"
 #include "sht40_driver.h"
@@ -19,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include <string.h>
 
 static const char *TAG = "SENSOR_HUB";
@@ -26,7 +28,6 @@ static const char *TAG = "SENSOR_HUB";
 static agri_calibration_t s_calibration;
 static bool s_initialized = false;
 
-/* Event bits for parallel sensor acquisition */
 #define SENSOR_BIT_DHT22    (1 << 0)
 #define SENSOR_BIT_SHT40    (1 << 1)
 #define SENSOR_BIT_SOIL     (1 << 2)
@@ -36,23 +37,22 @@ static bool s_initialized = false;
 #define SENSOR_BIT_SCD40    (1 << 6)
 #define SENSOR_BITS_ALL     (0x7F)
 
-/* Shared context for parallel tasks */
 typedef struct {
-    agri_sensor_data_t *data;
-    uint16_t           *alarm_flags;
-    EventGroupHandle_t  event_group;
+    agri_sensor_data_t  *data;
+    uint16_t            *alarm_flags;
+    EventGroupHandle_t   event_group;
+    SemaphoreHandle_t    data_mutex;    /* FIX: protects data & alarm_flags */
 } sensor_ctx_t;
 
 /* ── I2C Bus Init ──────────────────────────────────────────────────── */
-
 static esp_err_t sensor_hub_i2c_init(const sensor_hub_config_t *cfg)
 {
     i2c_config_t i2c_cfg = {
-        .mode       = I2C_MODE_MASTER,
-        .sda_io_num = cfg->i2c_sda,
-        .scl_io_num = cfg->i2c_scl,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .mode           = I2C_MODE_MASTER,
+        .sda_io_num     = cfg->i2c_sda,
+        .scl_io_num     = cfg->i2c_scl,
+        .sda_pullup_en  = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en  = GPIO_PULLUP_ENABLE,
         .master.clk_speed = cfg->i2c_freq_hz ? cfg->i2c_freq_hz : 100000,
     };
 
@@ -82,10 +82,14 @@ static void task_read_dht22(void *arg)
     dht22_data_t d;
 
     if (dht22_read(&d) == ESP_OK && d.valid) {
-        ctx->data->temp_c = d.temperature;
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
+        ctx->data->temp_c       = d.temperature;
         ctx->data->humidity_pct = d.humidity;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_DHT22_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
         ESP_LOGW(TAG, "DHT22 read failed");
     }
 
@@ -99,11 +103,15 @@ static void task_read_sht40(void *arg)
     sht40_data_t d;
 
     if (sht40_read(&d) == ESP_OK && d.valid) {
-        /* SHT40 is higher precision — override DHT22 if valid */
-        ctx->data->temp_c = d.temperature;
+        /* SHT40 is higher precision — overrides DHT22 if valid */
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
+        ctx->data->temp_c       = d.temperature;
         ctx->data->humidity_pct = d.humidity;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_SHT40_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
         ESP_LOGW(TAG, "SHT40 read failed");
     }
 
@@ -117,10 +125,14 @@ static void task_read_soil(void *arg)
     soil_moisture_data_t d;
 
     if (soil_moisture_read(&d) == ESP_OK && d.valid) {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         ctx->data->soil_moist_pct = d.vwc_pct;
-        ctx->data->soil_temp_c = d.soil_temp_c;
+        ctx->data->soil_temp_c    = d.soil_temp_c;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_SOIL_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
         ESP_LOGW(TAG, "Soil moisture read failed");
     }
 
@@ -134,11 +146,15 @@ static void task_read_npk(void *arg)
     npk_data_t d;
 
     if (npk_read(&d) == ESP_OK && d.valid) {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         ctx->data->npk_n = d.nitrogen;
         ctx->data->npk_p = d.phosphorus;
         ctx->data->npk_k = d.potassium;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_NPK_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
         ESP_LOGW(TAG, "NPK read failed");
     }
 
@@ -152,9 +168,13 @@ static void task_read_rain(void *arg)
     rain_gauge_data_t d;
 
     if (rain_gauge_read(&d) == ESP_OK && d.valid) {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         ctx->data->rain_mm = d.rain_mm;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_RAIN_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
     }
 
     xEventGroupSetBits(ctx->event_group, SENSOR_BIT_RAIN);
@@ -167,9 +187,13 @@ static void task_read_bh1750(void *arg)
     bh1750_data_t d;
 
     if (bh1750_read(&d) == ESP_OK && d.valid) {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         ctx->data->lux = d.lux;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_BH1750_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
         ESP_LOGW(TAG, "BH1750 read failed");
     }
 
@@ -183,9 +207,13 @@ static void task_read_scd40(void *arg)
     scd40_data_t d;
 
     if (scd40_read(&d) == ESP_OK && d.valid) {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         ctx->data->co2_ppm = d.co2_ppm;
+        xSemaphoreGive(ctx->data_mutex);
     } else {
+        xSemaphoreTake(ctx->data_mutex, portMAX_DELAY);
         *ctx->alarm_flags |= ALARM_FLAG_SCD40_FAULT;
+        xSemaphoreGive(ctx->data_mutex);
         ESP_LOGW(TAG, "SCD40 read failed");
     }
 
@@ -205,45 +233,25 @@ esp_err_t sensor_hub_init(const sensor_hub_config_t *config)
     memcpy(&s_calibration, &config->calibration, sizeof(agri_calibration_t));
     int errors = 0;
 
-    /* Initialize I2C bus */
     esp_err_t ret = sensor_hub_i2c_init(config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2C init failed — I2C sensors unavailable");
-        errors++;
-    }
+    if (ret != ESP_OK) { ESP_LOGE(TAG, "I2C init failed"); errors++; }
 
-    /* Initialize DHT22 */
     dht22_config_t dht_cfg = { .data_pin = config->dht22_pin };
-    if (dht22_init(&dht_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "DHT22 init failed");
-        errors++;
-    }
+    if (dht22_init(&dht_cfg) != ESP_OK) { ESP_LOGW(TAG, "DHT22 init failed"); errors++; }
 
-    /* Initialize SHT40 */
-    sht40_config_t sht_cfg = {
-        .i2c_port = config->i2c_port,
-        .i2c_addr = SHT40_I2C_ADDR,
-    };
-    if (sht40_init(&sht_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "SHT40 init failed");
-        errors++;
-    }
+    sht40_config_t sht_cfg = { .i2c_port = config->i2c_port, .i2c_addr = SHT40_I2C_ADDR };
+    if (sht40_init(&sht_cfg) != ESP_OK) { ESP_LOGW(TAG, "SHT40 init failed"); errors++; }
 
-    /* Initialize soil moisture */
     soil_moisture_config_t soil_cfg = {
-        .adc_unit     = config->soil_adc_unit,
-        .channel      = config->soil_adc_channel,
+        .adc_unit    = config->soil_adc_unit,
+        .channel     = config->soil_adc_channel,
         .temp_channel = config->soil_temp_channel,
-        .attenuation  = ADC_ATTEN_DB_12,
-        .cal_dry      = config->soil_cal_dry,
-        .cal_wet      = config->soil_cal_wet,
+        .attenuation = ADC_ATTEN_DB_12,
+        .cal_dry     = config->soil_cal_dry,
+        .cal_wet     = config->soil_cal_wet,
     };
-    if (soil_moisture_init(&soil_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "Soil moisture init failed");
-        errors++;
-    }
+    if (soil_moisture_init(&soil_cfg) != ESP_OK) { ESP_LOGW(TAG, "Soil init failed"); errors++; }
 
-    /* Initialize NPK RS-485 */
     npk_config_t npk_cfg = {
         .uart_port  = config->npk_uart_port,
         .tx_pin     = config->npk_tx_pin,
@@ -252,40 +260,16 @@ esp_err_t sensor_hub_init(const sensor_hub_config_t *config)
         .baud_rate  = NPK_DEFAULT_BAUD,
         .slave_addr = NPK_DEFAULT_SLAVE_ADDR,
     };
-    if (npk_init(&npk_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "NPK init failed");
-        errors++;
-    }
+    if (npk_init(&npk_cfg) != ESP_OK) { ESP_LOGW(TAG, "NPK init failed"); errors++; }
 
-    /* Initialize rain gauge */
-    rain_gauge_config_t rain_cfg = {
-        .pulse_pin = config->rain_pin,
-        .edge      = GPIO_INTR_NEGEDGE,
-    };
-    if (rain_gauge_init(&rain_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "Rain gauge init failed");
-        errors++;
-    }
+    rain_gauge_config_t rain_cfg = { .pulse_pin = config->rain_pin, .edge = GPIO_INTR_NEGEDGE };
+    if (rain_gauge_init(&rain_cfg) != ESP_OK) { ESP_LOGW(TAG, "Rain gauge init failed"); errors++; }
 
-    /* Initialize BH1750 */
-    bh1750_config_t bh_cfg = {
-        .i2c_port = config->i2c_port,
-        .i2c_addr = BH1750_I2C_ADDR_LOW,
-    };
-    if (bh1750_init(&bh_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "BH1750 init failed");
-        errors++;
-    }
+    bh1750_config_t bh_cfg = { .i2c_port = config->i2c_port, .i2c_addr = BH1750_I2C_ADDR_LOW };
+    if (bh1750_init(&bh_cfg) != ESP_OK) { ESP_LOGW(TAG, "BH1750 init failed"); errors++; }
 
-    /* Initialize SCD40 */
-    scd40_config_t scd_cfg = {
-        .i2c_port = config->i2c_port,
-        .i2c_addr = SCD40_I2C_ADDR,
-    };
-    if (scd40_init(&scd_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "SCD40 init failed");
-        errors++;
-    }
+    scd40_config_t scd_cfg = { .i2c_port = config->i2c_port, .i2c_addr = SCD40_I2C_ADDR };
+    if (scd40_init(&scd_cfg) != ESP_OK) { ESP_LOGW(TAG, "SCD40 init failed"); errors++; }
 
     s_initialized = true;
     ESP_LOGI(TAG, "Initialized (%d/%d sensors OK)", 7 - errors, 7);
@@ -294,16 +278,16 @@ esp_err_t sensor_hub_init(const sensor_hub_config_t *config)
 
 esp_err_t sensor_hub_acquire_all(agri_sensor_data_t *data, uint16_t *alarm_flags)
 {
-    if (data == NULL || alarm_flags == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (!s_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (!data || !alarm_flags) return ESP_ERR_INVALID_ARG;
+    if (!s_initialized)        return ESP_ERR_INVALID_STATE;
 
     EventGroupHandle_t eg = xEventGroupCreate();
-    if (eg == NULL) {
-        ESP_LOGE(TAG, "Failed to create event group");
+    if (!eg) { ESP_LOGE(TAG, "Event group create failed"); return ESP_ERR_NO_MEM; }
+
+    SemaphoreHandle_t mx = xSemaphoreCreateMutex();
+    if (!mx) {
+        vEventGroupDelete(eg);
+        ESP_LOGE(TAG, "Mutex create failed");
         return ESP_ERR_NO_MEM;
     }
 
@@ -311,49 +295,40 @@ esp_err_t sensor_hub_acquire_all(agri_sensor_data_t *data, uint16_t *alarm_flags
         .data        = data,
         .alarm_flags = alarm_flags,
         .event_group = eg,
+        .data_mutex  = mx,
     };
 
     /* Launch parallel sensor tasks */
-    BaseType_t ok;
-    ok = xTaskCreate(task_read_dht22,  "dht22",  4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "DHT22 task create failed");
+    struct { TaskFunction_t fn; const char *name; } tasks[] = {
+        { task_read_dht22,  "dht22"  },
+        { task_read_sht40,  "sht40"  },
+        { task_read_soil,   "soil"   },
+        { task_read_npk,    "npk"    },
+        { task_read_rain,   "rain"   },
+        { task_read_bh1750, "bh1750" },
+        { task_read_scd40,  "scd40"  },
+    };
+    for (int i = 0; i < 7; i++) {
+        if (xTaskCreate(tasks[i].fn, tasks[i].name, 4096, &ctx, 4, NULL) != pdPASS) {
+            ESP_LOGW(TAG, "%s task create failed", tasks[i].name);
+        }
+    }
 
-    ok = xTaskCreate(task_read_sht40,  "sht40",  4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "SHT40 task create failed");
-
-    ok = xTaskCreate(task_read_soil,   "soil",   4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "Soil task create failed");
-
-    ok = xTaskCreate(task_read_npk,    "npk",    4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "NPK task create failed");
-
-    ok = xTaskCreate(task_read_rain,   "rain",   4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "Rain task create failed");
-
-    ok = xTaskCreate(task_read_bh1750, "bh1750", 4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "BH1750 task create failed");
-
-    ok = xTaskCreate(task_read_scd40,  "scd40",  4096, &ctx, 4, NULL);
-    if (ok != pdPASS) ESP_LOGW(TAG, "SCD40 task create failed");
-
-    /* Wait for all sensors (10 second max timeout) */
     EventBits_t bits = xEventGroupWaitBits(eg, SENSOR_BITS_ALL,
                                             pdTRUE, pdTRUE,
                                             pdMS_TO_TICKS(10000));
-
     if ((bits & SENSOR_BITS_ALL) != SENSOR_BITS_ALL) {
-        ESP_LOGW(TAG, "Sensor acquisition timeout (bits=0x%lX)", (unsigned long)bits);
+        ESP_LOGW(TAG, "Sensor timeout (bits=0x%lX)", (unsigned long)bits);
     }
 
+    vSemaphoreDelete(mx);
     vEventGroupDelete(eg);
 
-    /* Apply calibration */
     agri_data_apply_calibration(data, &s_calibration);
 
-    ESP_LOGI(TAG, "Acquisition complete: T=%.1f H=%.1f SM=%.1f CO2=%u Lux=%lu",
+    ESP_LOGI(TAG, "Acquisition done: T=%.1f H=%.1f SM=%.1f CO2=%u Lux=%lu",
              data->temp_c, data->humidity_pct, data->soil_moist_pct,
              data->co2_ppm, (unsigned long)data->lux);
-
     return ESP_OK;
 }
 
@@ -366,7 +341,6 @@ void sensor_hub_deinit(void)
     rain_gauge_deinit();
     bh1750_deinit();
     scd40_deinit();
-
     s_initialized = false;
     ESP_LOGI(TAG, "All sensors deinitialized");
 }
